@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { runCommand } from '@qqbot/sdk/testing'
+import { createMockContext, createMockSession, runCommand } from '@qqbot/sdk/testing'
 import plugin from './index.js'
 import type { PluginConfig } from './index.js'
 
@@ -18,8 +18,16 @@ const ILLUST = {
 
 const CONFIG = plugin.defaultConfig! as PluginConfig
 
+/** 图片字节 0x01 0x02 0x03 → base64 'AQID' */
+const IMG_BYTES = [0x01, 0x02, 0x03]
+const IMG_BASE64 = 'AQID'
+
+/** API 响应在先、图片下载在后 */
 function okFetch(body: unknown) {
-  return vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => body })
+  return vi
+    .fn()
+    .mockResolvedValueOnce({ ok: true, status: 200, json: async () => body })
+    .mockResolvedValueOnce({ ok: true, status: 200, arrayBuffer: async () => new Uint8Array(IMG_BYTES).buffer })
 }
 
 function run(argText: string, config?: Partial<PluginConfig>) {
@@ -36,43 +44,51 @@ describe('pixiv plugin', () => {
     expect(replies[0]).toContain('/pixiv illust')
   })
 
-  it('random 默认 original 尺寸，信息与图片合成一条消息', async () => {
+  it('random：作品信息与图片分两条发送，图片为 base64 直传', async () => {
     const fetchMock = okFetch({ success: true, data: ILLUST })
     vi.stubGlobal('fetch', fetchMock)
     const { replies } = await run('random')
     expect(replies).toEqual([
-      {
-        text: '随机Pixiv图片\n标题：青のパレード\n作者：朔月八雲 (ID: 17509087)\n标签：女の子, オリジナル, 少女',
-        image: { url: 'https://pixiv.yuki.sh/image/img-original/original.png' },
-      },
+      '随机Pixiv图片\n标题：青のパレード\n作者：朔月八雲 (ID: 17509087)\n标签：女の子, オリジナル, 少女',
+      { image: { base64: IMG_BASE64 } },
     ])
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-    expect(url).toBe('https://pixiv.yuki.sh/api/recommend?type=json')
-    expect((init.headers as Record<string, string>).Referer).toBe('https://pixiv.yuki.sh/')
+    const [apiUrl, apiInit] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(apiUrl).toBe('https://pixiv.yuki.sh/api/recommend?type=json')
+    expect((apiInit.headers as Record<string, string>).Referer).toBe('https://pixiv.yuki.sh/')
+    const [imgUrl] = fetchMock.mock.calls[1] as [string]
+    expect(imgUrl).toBe('https://pixiv.yuki.sh/image/img-master/regular.jpg') // 默认尺寸 regular
   })
 
-  it('random 显式尺寸参数优先生效', async () => {
-    vi.stubGlobal('fetch', okFetch({ success: true, data: ILLUST }))
-    const { replies } = await run('random regular')
-    expect((replies[0] as { image: { url: string } }).image.url).toBe('https://pixiv.yuki.sh/image/img-master/regular.jpg')
+  it('random：显式尺寸参数优先生效', async () => {
+    const fetchMock = okFetch({ success: true, data: ILLUST })
+    vi.stubGlobal('fetch', fetchMock)
+    await run('random mini')
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('https://pixiv.yuki.sh/image/c/48x48/mini.jpg')
   })
 
-  it('random 非法尺寸参数回落配置默认', async () => {
-    vi.stubGlobal('fetch', okFetch({ success: true, data: ILLUST }))
-    const { replies } = await run('random huge', { default_image_size: 'regular' })
-    expect((replies[0] as { image: { url: string } }).image.url).toBe('https://pixiv.yuki.sh/image/img-master/regular.jpg')
+  it('random：非法尺寸参数回落配置默认', async () => {
+    const fetchMock = okFetch({ success: true, data: ILLUST })
+    vi.stubGlobal('fetch', fetchMock)
+    await run('random huge', { default_image_size: 'regular' })
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('https://pixiv.yuki.sh/image/img-master/regular.jpg')
   })
 
   it('show_image_info 关闭时只发图', async () => {
     vi.stubGlobal('fetch', okFetch({ success: true, data: ILLUST }))
     const { replies } = await run('random', { show_image_info: false })
-    expect(replies).toEqual([{ image: { url: 'https://pixiv.yuki.sh/image/img-original/original.png' } }])
+    expect(replies).toEqual([{ image: { base64: IMG_BASE64 } }])
   })
 
   it('直链某档缺失时逐级回落', async () => {
-    vi.stubGlobal('fetch', okFetch({ success: true, data: { ...ILLUST, urls: { small: 'https://pixiv.yuki.sh/image/small.jpg' } } }))
+    const fetchMock = okFetch({
+      success: true,
+      data: { ...ILLUST, urls: { small: 'https://pixiv.yuki.sh/image/small.jpg' } },
+    })
+    vi.stubGlobal('fetch', fetchMock)
     const { replies } = await run('random')
-    expect((replies[0] as { image: { url: string } }).image.url).toBe('https://pixiv.yuki.sh/image/small.jpg')
+    expect(replies).toHaveLength(2)
+    expect(replies[1]).toEqual({ image: { base64: IMG_BASE64 } })
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('https://pixiv.yuki.sh/image/small.jpg')
   })
 
   it('illust 非数字 ID 直接拒绝，不发请求', async () => {
@@ -83,21 +99,18 @@ describe('pixiv plugin', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('illust 查询返回详情文案与图片', async () => {
+  it('illust：详情文案与图片分两条发送', async () => {
     const fetchMock = okFetch({ success: true, data: ILLUST })
     vi.stubGlobal('fetch', fetchMock)
     const { replies } = await run('illust 118908797')
-    expect(replies).toEqual([
-      {
-        text:
-          '作品详情 (ID: 118908797)\n' +
-          '标题：青のパレード\n' +
-          '作者：朔月八雲 (ID: 17509087 | 账号：sakutsuki)\n' +
-          '描述：无\n' +
-          '标签：女の子, オリジナル, 少女',
-        image: { url: 'https://pixiv.yuki.sh/image/img-original/original.png' },
-      },
-    ])
+    expect(replies[0]).toBe(
+      '作品详情 (ID: 118908797)\n' +
+        '标题：青のパレード\n' +
+        '作者：朔月八雲 (ID: 17509087 | 账号：sakutsuki)\n' +
+        '描述：无\n' +
+        '标签：女の子, オリジナル, 少女',
+    )
+    expect(replies[1]).toEqual({ image: { base64: IMG_BASE64 } })
     expect(fetchMock.mock.calls[0]?.[0]).toBe('https://pixiv.yuki.sh/api/illust?id=118908797')
   })
 
@@ -108,7 +121,7 @@ describe('pixiv plugin', () => {
   })
 
   it('success:false 透出上游 message', async () => {
-    vi.stubGlobal('fetch', okFetch({ success: false, message: '作品不存在' }))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: false, message: '作品不存在' }) }))
     const { replies } = await run('illust 999')
     expect(replies[0]).toBe('作品不存在')
   })
@@ -122,5 +135,43 @@ describe('pixiv plugin', () => {
   it('未知子命令回复帮助文案', async () => {
     const { replies } = await run('wallpaper')
     expect(replies[0]).toContain('/pixiv random')
+  })
+
+  it('图片下载失败：已发作品信息时不重复报错，纯图模式回错误文案', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ success: true, data: ILLUST }) })
+        .mockRejectedValueOnce(new Error('node down')),
+    )
+    const withInfo = await run('random')
+    expect(withInfo.replies).toHaveLength(1) // 只有作品信息
+
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ success: true, data: ILLUST }) })
+        .mockRejectedValueOnce(new Error('node down')),
+    )
+    const withoutInfo = await run('random', { show_image_info: false })
+    expect(withoutInfo.replies[0]).toContain('图片下载失败')
+  })
+
+  it('被动回复被拒（reply not ok）：返回带原因的错误文案', async () => {
+    vi.stubGlobal('fetch', okFetch({ success: true, data: ILLUST }))
+    const session = createMockSession()
+    const ctx = createMockContext(plugin, { config: CONFIG })
+    const replyMock = vi.fn().mockResolvedValue({ ok: false, status: 500, error: '平台拒绝（错误码 11244）' })
+    session.reply = replyMock as never
+
+    const result = await (plugin.commands!.pixiv as { handler: (i: unknown) => Promise<string | undefined> }).handler({
+      args: ['random'],
+      ctx,
+      session,
+    })
+    expect(replyMock).toHaveBeenCalledTimes(1)
+    expect(result).toContain('平台拒绝（错误码 11244）')
   })
 })

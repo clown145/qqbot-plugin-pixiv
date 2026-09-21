@@ -19,6 +19,10 @@ const REQUEST_HEADERS: Record<string, string> = {
   'User-Agent':
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   Referer: 'https://pixiv.yuki.sh/',
+  // yuki.sh（Vercel）按 Sec-Fetch-Site 做防盗链，非浏览器请求会被 403（Forbidden.），需伪装同站特征
+  'Sec-Fetch-Site': 'same-origin',
+  'Sec-Fetch-Mode': 'no-cors',
+  'Sec-Fetch-Dest': 'image',
 }
 
 /** API 返回的作品数据（只取用到的字段） */
@@ -57,11 +61,32 @@ async function fetchIllust(path: string): Promise<Illust> {
   return body.data
 }
 
-/** 解析尺寸参数：显式参数优先，其次面板配置，兜底 original（配置快照可能缺字段，不能直接信任） */
+/** 下载图片并转 base64：QQ 富媒体服务器拉不到境外图床直链，改为直传文件数据 */
+async function fetchImageBase64(url: string): Promise<string> {
+  let res: Response
+  try {
+    res = await fetch(url, { headers: REQUEST_HEADERS, signal: AbortSignal.timeout(TIMEOUT_MS) })
+  } catch (e) {
+    throw new Error((e as Error)?.name === 'TimeoutError' ? '请求超时' : '连接失败')
+  }
+  if (!res.ok) throw new ApiError(res.status)
+  return toBase64(new Uint8Array(await res.arrayBuffer()))
+}
+
+function toBase64(bytes: Uint8Array): string {
+  const CHUNK = 0x8000
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
+  }
+  return btoa(binary)
+}
+
+/** 解析尺寸参数：显式参数优先，其次面板配置，兜底 regular（配置快照可能缺字段，不能直接信任） */
 function pickSize(arg: string | undefined, configured: unknown): ImageSize {
   if (arg && (SIZES as readonly string[]).includes(arg)) return arg as ImageSize
   if (configured && (SIZES as readonly string[]).includes(configured as string)) return configured as ImageSize
-  return 'original'
+  return 'regular'
 }
 
 /** 按尺寸取直链，缺失时逐级回落，保证能发出图 */
@@ -85,14 +110,6 @@ function infoText(illust: Illust, detail: boolean): string {
   )
 }
 
-/** 作品信息（可选）与图片合成一条消息，图片直链由 QQ 平台服务器拉取 */
-function buildReply(illust: Illust, withInfo: boolean, detail: boolean, size: ImageSize): string | { text?: string; image: { url: string } } {
-  const url = pickUrl(illust, size)
-  if (!url) return '未获取到图片链接，请稍后再试'
-  if (!withInfo) return { image: { url } }
-  return { text: infoText(illust, detail), image: { url } }
-}
-
 /** 人类可读的错误文案（对齐原插件） */
 function errorMessage(e: unknown): string {
   if (e instanceof ApiError) {
@@ -107,6 +124,47 @@ const HELP =
   '/pixiv random [尺寸]\n' +
   '/pixiv illust [作品id]'
 
+interface SendOpts {
+  session: { reply(message: unknown): Promise<{ ok: boolean; error?: string }> }
+  logger: { error(message: string, data?: unknown): void }
+  size: ImageSize
+  /** 是否附带作品信息（illust 恒为 true，random 跟随配置） */
+  withInfo: boolean
+  /** 信息用简略（random）还是详情（illust）文案 */
+  detail: boolean
+}
+
+/**
+ * 发送一条作品：先作品信息（可选），再图片（base64 直传，纯图消息）。
+ * 文字已发出的情况下图片失败不重复刷屏，只记日志；纯图模式失败才回错误文案。
+ */
+async function sendIllust(illust: Illust, opts: SendOpts): Promise<string | undefined> {
+  const text = opts.withInfo ? infoText(illust, opts.detail) : undefined
+  const info = text ? await opts.session.reply(text) : null
+  if (info && !info.ok) {
+    opts.logger.error('作品信息发送失败', { error: info.error ?? '未知错误' })
+    return `消息发送失败：${info.error ?? '未知错误'}`
+  }
+
+  const url = pickUrl(illust, opts.size)
+  if (!url) return text ? undefined : '未获取到图片链接，请稍后再试'
+
+  let base64: string
+  try {
+    base64 = await fetchImageBase64(url)
+  } catch (e) {
+    opts.logger.error('图片下载失败', { url, error: String((e as Error)?.message ?? e) })
+    return text ? undefined : `图片下载失败（${errorMessage(e)}）`
+  }
+
+  const sent = await opts.session.reply({ image: { base64 } })
+  if (!sent.ok) {
+    opts.logger.error('图片发送失败', { url, error: sent.error ?? '未知错误' })
+    return text ? undefined : `图片发送失败：${sent.error ?? '未知错误'}`
+  }
+  return undefined
+}
+
 export default definePlugin<PluginConfig>({
   name: 'pixiv',
   displayName: 'Pixiv 图床',
@@ -117,29 +175,41 @@ export default definePlugin<PluginConfig>({
     type: 'object',
     properties: {
       show_image_info: { type: 'boolean', title: '随机图片是否显示作品信息（标题、作者、标签）', default: true },
-      default_image_size: { type: 'string', title: '随机图片默认尺寸', enum: [...SIZES], default: 'original' },
+      default_image_size: {
+        type: 'string',
+        title: '随机图片默认尺寸',
+        enum: [...SIZES],
+        default: 'regular',
+        description: 'regular 为 master1200 jpg，原图直传体积大、易上传失败',
+      },
     },
   },
-  defaultConfig: { show_image_info: true, default_image_size: 'original' },
+  defaultConfig: { show_image_info: true, default_image_size: 'regular' },
 
   commands: {
     pixiv: {
       description: 'Pixiv 随机美图 / 作品详情',
       usage: HELP,
-      async handler({ args, ctx }) {
+      async handler({ args, ctx, session }) {
         const sub = (args[0] ?? '').toLowerCase()
         try {
           if (sub === 'random') {
             const size = pickSize(args[1], ctx.config.default_image_size)
             const illust = await fetchIllust('recommend?type=json')
-            return buildReply(illust, ctx.config.show_image_info ?? true, false, size)
+            return await sendIllust(illust, {
+              session,
+              logger: ctx.logger,
+              size,
+              withInfo: ctx.config.show_image_info ?? true,
+              detail: false,
+            })
           }
           if (sub === 'illust') {
             const id = args[1]
             if (!id) return '请输入作品id：/pixiv illust [id]'
             if (!/^\d+$/.test(id)) return '作品ID必须是数字'
             const illust = await fetchIllust(`illust?id=${id}`)
-            return buildReply(illust, true, true, pickSize(undefined, ctx.config.default_image_size))
+            return await sendIllust(illust, { session, logger: ctx.logger, size: pickSize(undefined, ctx.config.default_image_size), withInfo: true, detail: true })
           }
           return HELP
         } catch (e) {
