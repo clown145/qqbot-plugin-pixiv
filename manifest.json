@@ -1,0 +1,53 @@
+{
+  "name": "pixiv",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "permissions": [
+    "net"
+  ],
+  "depends": {},
+  "conflicts": [],
+  "commands": [
+    {
+      "name": "pixiv",
+      "description": "Pixiv 随机美图 / 作品详情",
+      "usage": "请按格式使用：\n/pixiv random [尺寸]\n/pixiv illust [作品id]"
+    }
+  ],
+  "regex": [],
+  "events": [],
+  "buttons": [],
+  "cron": [],
+  "routes": [],
+  "hasMiddleware": false,
+  "services": [],
+  "durableObjects": [],
+  "displayName": "Pixiv 图床",
+  "description": "随机获取 Pixiv 美图、按作品 ID 查询详情（pixiv.yuki.sh 第三方图床）",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "show_image_info": {
+        "type": "boolean",
+        "title": "随机图片是否显示作品信息（标题、作者、标签）",
+        "default": true
+      },
+      "default_image_size": {
+        "type": "string",
+        "title": "随机图片默认尺寸",
+        "enum": [
+          "mini",
+          "thumb",
+          "small",
+          "regular",
+          "original"
+        ],
+        "default": "original"
+      }
+    }
+  },
+  "defaultConfig": {
+    "show_image_info": true,
+    "default_image_size": "original"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "qqbot-plugin-pixiv",
+  "version": "1.0.0",
+  "description": "Pixiv 随机美图 / 作品详情查询（pixiv.yuki.sh 第三方图床）",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "qqbot-plugin"
+  ],
+  "scripts": {
+    "build": "qqbot-plugin build",
+    "sync": "qqbot-plugin build && node -e \"require('node:fs').copyFileSync('dist/manifest.json','manifest.json')\"",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250917.0",
+    "@qqbot/plugin-cli": "^0.1.0",
+    "@qqbot/sdk": "^0.1.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
