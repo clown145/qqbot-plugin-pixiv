@@ -1,6 +1,6 @@
 {
   "name": "pixiv",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "apiVersion": 1,
   "permissions": [
     "net"
@@ -63,7 +63,23 @@
         "type": "string",
         "title": "Worker 公开地址（走 URL 直传，可绕开 CPU 上限）",
         "default": "",
-        "description": "填 Worker 的公开访问地址（如 https://bot.example.com），图片改由 QQ 自己来拉，插件侧 CPU 归零、无体积上限。留空则回退 base64 直传。注意：QQ 是后台异步拉取，拉不到时不会报错、只会静默不出图，设置后务必实测一张能否收到；收不到就清空此项"
+        "description": "填 Worker 的公开访问地址（如 https://bot.example.com），图片改由平台自己来拉，插件侧 CPU 归零、不受体积上限约束。留空则回退 base64 直传。只接受 https。填了之后建议实测一张：若平台拉不到该域名（workers.dev 在国内可达性不稳），本条会自动回退 base64 并在日志留下 warn，不会静默丢图"
+      },
+      "show_buttons": {
+        "type": "boolean",
+        "title": "在文本消息上挂内嵌按钮",
+        "default": true,
+        "description": "在作品信息与帮助文案下方挂\"再来一张\"等按钮，点击即自动发送对应指令。按钮需要 bot 侧开通（官方文档把自定义按钮标为\"内邀开通\"）；未开通时发送会失败，插件会自动去掉按钮重试一次，最坏退化成纯文本，不会丢消息。注意图片消息挂不了按钮——按钮只能挂在 markdown 文本消息上"
+      },
+      "message_order": {
+        "type": "string",
+        "title": "文本与图片的发送顺序",
+        "default": "text_first",
+        "enum": [
+          "text_first",
+          "image_first"
+        ],
+        "description": "text_first：先发作品信息（按钮紧贴其下），再发图片；image_first：先发图片，作品信息连同按钮落在最底部。想按按钮时少滚一点选 image_first；图片发送失败时该模式不会发文案（描述一张没发出的图没有意义）"
       }
     }
   },
@@ -71,6 +87,8 @@
     "show_image_info": true,
     "default_image_size": "regular",
     "max_image_mb": 20,
-    "public_base_url": ""
+    "public_base_url": "",
+    "show_buttons": true,
+    "message_order": "text_first"
   }
 }

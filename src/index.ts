@@ -1,4 +1,12 @@
-import { definePlugin, type Logger } from '@qqbot/sdk'
+import {
+  button,
+  definePlugin,
+  keyboard,
+  type Keyboard,
+  type Logger,
+  type OutgoingMessage,
+  type SendResult,
+} from '@qqbot/sdk'
 
 /** 与 configSchema 对应；面板保存的配置通过 ctx.config 注入 */
 export interface PluginConfig {
@@ -10,9 +18,18 @@ export interface PluginConfig {
   max_image_mb: number
   /** Worker 的公开访问地址（如 https://bot.example.com）；留空则回退 base64 直传 */
   public_base_url: string
+  /** 是否在文本消息上挂内嵌按钮 */
+  show_buttons: boolean
+  /** 文本与图片的发送顺序 */
+  message_order: MessageOrder
 }
 
 export type ImageSize = 'mini' | 'thumb' | 'small' | 'regular' | 'original'
+
+/** 文本与图片的先后；text_first 时按钮夹在文本与图片之间，image_first 时按钮落在最底部 */
+export type MessageOrder = 'text_first' | 'image_first'
+
+const MESSAGE_ORDERS: readonly MessageOrder[] = ['text_first', 'image_first']
 
 const SIZES: readonly ImageSize[] = ['mini', 'thumb', 'small', 'regular', 'original']
 
@@ -245,6 +262,62 @@ function buildProxyUrl(origin: string, src: string): string {
   return `${origin.replace(/\/+$/, '')}${PROXY_MOUNT}${PROXY_PATH}?src=${encodeURIComponent(src)}`
 }
 
+/** 解析发送顺序：配置快照可能缺字段或被改坏，兜底 text_first（沿用既有行为） */
+function resolveOrder(configured: unknown): MessageOrder {
+  return (MESSAGE_ORDERS as readonly string[]).includes(configured as string)
+    ? (configured as MessageOrder)
+    : 'text_first'
+}
+
+/**
+ * 命令按钮（`action.type = 2`）。客户端会自己把 `@bot + data` 填进输入框并发送，
+ * 因此**不经过 `INTERACTION_CREATE`**：不需要写 `buttons` 回调处理器，也没有
+ * 官方那 3 秒的 ack 时限（回调按钮要在这条消息链路上查 API + 发图，很容易超时）。
+ * 插入的 `@bot` 还顺带解决了群聊必须 @ 才能被收到的问题。
+ */
+function cmdButton(label: string, command: string) {
+  return button.command(label, command, { enter: true })
+}
+
+/** 随机图的"再来一张"：复用刚生效的那条指令，含显式尺寸参数 */
+function rerollKeyboard(command: string, label = '再来一张'): Keyboard {
+  return keyboard([[cmdButton(label, command)]])
+}
+
+/** 帮助文案的按钮：把三条常用指令变成可点的，省掉手打 */
+function helpKeyboard(): Keyboard {
+  return keyboard([
+    [
+      cmdButton('随机一张', '/pixiv random'),
+      cmdButton('随机原图', '/pixiv random original'),
+      cmdButton('随机小图', '/pixiv random small'),
+    ],
+  ])
+}
+
+type ReplyFn = (message: OutgoingMessage) => Promise<SendResult>
+type ReplyLogger = Pick<Logger, 'info' | 'warn' | 'error'>
+
+/**
+ * 发一条文本，可选挂按钮。
+ *
+ * 带按钮失败时**去掉按钮重试一次**：内嵌按钮需要 bot 侧开通（官方文档把自定义按钮
+ * 标为"内邀开通"），没开通时平台可能整条拒收。一次重试把最坏情况从"整条消息失败"
+ * 降级成"没有按钮的纯文本"，这个代价很划算。
+ */
+async function replyText(
+  session: { reply: ReplyFn },
+  logger: ReplyLogger,
+  text: string,
+  kb: Keyboard | undefined,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!kb) return session.reply(text)
+  const res = await session.reply({ text, keyboard: kb })
+  if (res.ok) return res
+  logger.warn('带按钮的文本发送失败，去掉按钮重试', { error: res.error ?? '未知错误' })
+  return session.reply(text)
+}
+
 function infoText(illust: Illust, detail: boolean): string {
   const user = illust.user ?? {}
   const tags = (illust.tags ?? []).join(', ')
@@ -275,8 +348,8 @@ const HELP =
   '/pixiv illust [作品id]'
 
 interface SendOpts {
-  session: { reply(message: unknown): Promise<{ ok: boolean; error?: string }> }
-  logger: Pick<Logger, 'info' | 'warn' | 'error'>
+  session: { reply: ReplyFn }
+  logger: ReplyLogger
   size: ImageSize
   /** 单张图片体积上限（字节），来自 resolveMaxBytes(ctx.config.max_image_mb) */
   maxBytes: number
@@ -286,22 +359,19 @@ interface SendOpts {
   withInfo: boolean
   /** 信息用简略（random）还是详情（illust）文案 */
   detail: boolean
+  /** 挂在文本消息上的按钮；undefined 表示不挂 */
+  keyboard: Keyboard | undefined
+  /** 文本与图片的先后顺序 */
+  order: MessageOrder
 }
 
 /**
- * 发送一条作品：先作品信息（可选），再图片（base64 直传，纯图消息）。
- * 文字已发出的情况下图片失败不重复刷屏，只记日志；纯图模式失败才回错误文案。
+ * 发送图片本身。返回错误文案（仅在需要向用户报错时非 undefined）——
+ * 是否把错误透给用户由调用方决定：文案已经发出去时就不该再刷一条错误。
  */
-async function sendIllust(illust: Illust, opts: SendOpts): Promise<string | undefined> {
-  const text = opts.withInfo ? infoText(illust, opts.detail) : undefined
-  const info = text ? await opts.session.reply(text) : null
-  if (info && !info.ok) {
-    opts.logger.error('作品信息发送失败', { error: info.error ?? '未知错误' })
-    return `消息发送失败：${info.error ?? '未知错误'}`
-  }
-
+async function sendImage(illust: Illust, opts: SendOpts): Promise<string | undefined> {
   const candidates = candidateUrls(illust, opts.size)
-  if (!candidates.length) return text ? undefined : '未获取到图片链接，请稍后再试'
+  if (!candidates.length) return '未获取到图片链接，请稍后再试'
 
   // 优先走 URL 直传：QQ 自己来拉，插件侧不下载、不编码、不序列化，CPU 归零，
   // 也就没有内联上传的体积天花板。请求头由代理路由自己加，QQ 不需要模拟浏览器。
@@ -341,9 +411,9 @@ async function sendIllust(illust: Illust, opts: SendOpts): Promise<string | unde
     opts.logger.error('图片下载失败', { size: opts.size, error: String((failure as Error)?.message ?? failure) })
     // 体积超限不是网络问题，别让用户去重试一个注定失败的请求
     if (failure instanceof ImageTooLargeError) {
-      return text ? undefined : `${failure.message}，请用更小的尺寸重试（如 /pixiv random small）`
+      return `${failure.message}，请用更小的尺寸重试（如 /pixiv random small）`
     }
-    return text ? undefined : `图片下载失败（${errorMessage(failure)}）`
+    return `图片下载失败（${errorMessage(failure)}）`
   }
   if (picked.size !== opts.size) {
     opts.logger.info('已回落尺寸', { requested: opts.size, used: picked.size, bytes: bytes.byteLength })
@@ -352,9 +422,47 @@ async function sendIllust(illust: Illust, opts: SendOpts): Promise<string | unde
   const sent = await opts.session.reply({ image: { base64: toBase64(bytes) } })
   if (!sent.ok) {
     opts.logger.error('图片发送失败', { url: picked.url, error: sent.error ?? '未知错误' })
-    return text ? undefined : `图片发送失败：${sent.error ?? '未知错误'}`
+    return `图片发送失败：${sent.error ?? '未知错误'}`
   }
   return undefined
+}
+
+/**
+ * 发送一条作品：作品信息（可选）+ 图片，顺序由 `opts.order` 决定。
+ *
+ * - `text_first`（默认）：文案在前，按钮紧贴文案下方；图片失败时因为文案已发出，只记日志不刷屏。
+ * - `image_first`：图片在前，文案连同按钮落在最底部；图片失败时**不发文案**——描述一张
+ *   没发出去的图没有意义，此时把错误透给用户。
+ */
+async function sendIllust(illust: Illust, opts: SendOpts): Promise<string | undefined> {
+  const text = opts.withInfo ? infoText(illust, opts.detail) : undefined
+  let textSent = false
+
+  const sendInfo = async (): Promise<string | undefined> => {
+    if (!text) return undefined
+    const res = await replyText(opts.session, opts.logger, text, opts.keyboard)
+    if (res.ok) {
+      textSent = true
+      return undefined
+    }
+    opts.logger.error('作品信息发送失败', { error: res.error ?? '未知错误' })
+    return `消息发送失败：${res.error ?? '未知错误'}`
+  }
+
+  if (opts.order === 'text_first') {
+    const err = await sendInfo()
+    if (err) return err
+  }
+
+  const imageErr = await sendImage(illust, opts)
+
+  if (opts.order === 'image_first' && !imageErr) {
+    const err = await sendInfo()
+    if (err) return err
+  }
+
+  // 文案已经发出去时不再重复报错，避免一次失败刷两条消息
+  return textSent ? undefined : imageErr
 }
 
 export default definePlugin<PluginConfig>({
@@ -388,7 +496,22 @@ export default definePlugin<PluginConfig>({
         title: 'Worker 公开地址（走 URL 直传，可绕开 CPU 上限）',
         default: '',
         description:
-          '填 Worker 的公开访问地址（如 https://bot.example.com），图片改由 QQ 自己来拉，插件侧 CPU 归零、无体积上限。留空则回退 base64 直传。注意：QQ 是后台异步拉取，拉不到时不会报错、只会静默不出图，设置后务必实测一张能否收到；收不到就清空此项',
+          '填 Worker 的公开访问地址（如 https://bot.example.com），图片改由平台自己来拉，插件侧 CPU 归零、不受体积上限约束。留空则回退 base64 直传。只接受 https。填了之后建议实测一张：若平台拉不到该域名（workers.dev 在国内可达性不稳），本条会自动回退 base64 并在日志留下 warn，不会静默丢图',
+      },
+      show_buttons: {
+        type: 'boolean',
+        title: '在文本消息上挂内嵌按钮',
+        default: true,
+        description:
+          '在作品信息与帮助文案下方挂"再来一张"等按钮，点击即自动发送对应指令。按钮需要 bot 侧开通（官方文档把自定义按钮标为"内邀开通"）；未开通时发送会失败，插件会自动去掉按钮重试一次，最坏退化成纯文本，不会丢消息。注意图片消息挂不了按钮——按钮只能挂在 markdown 文本消息上',
+      },
+      message_order: {
+        type: 'string',
+        title: '文本与图片的发送顺序',
+        default: 'text_first',
+        enum: [...MESSAGE_ORDERS],
+        description:
+          'text_first：先发作品信息（按钮紧贴其下），再发图片；image_first：先发图片，作品信息连同按钮落在最底部。想按按钮时少滚一点选 image_first；图片发送失败时该模式不会发文案（描述一张没发出的图没有意义）',
       },
     },
   },
@@ -397,6 +520,8 @@ export default definePlugin<PluginConfig>({
     default_image_size: 'regular',
     max_image_mb: DEFAULT_MAX_IMAGE_MB,
     public_base_url: '',
+    show_buttons: true,
+    message_order: 'text_first',
   },
 
   commands: {
@@ -407,10 +532,14 @@ export default definePlugin<PluginConfig>({
         const sub = (args[0] ?? '').toLowerCase()
         const maxBytes = resolveMaxBytes(ctx.config.max_image_mb)
         const publicBaseUrl = resolvePublicBaseUrl(ctx.config.public_base_url)
+        const order = resolveOrder(ctx.config.message_order)
+        const showButtons = ctx.config.show_buttons ?? true
         try {
           if (sub === 'random') {
             const size = pickSize(args[1], ctx.config.default_image_size)
             const illust = await fetchIllust('recommend?type=json')
+            // 按钮复用刚生效的那条指令：显式尺寸参数合法时带上它，否则回到默认尺寸
+            const explicit = args[1] && (SIZES as readonly string[]).includes(args[1]) ? ` ${args[1]}` : ''
             return await sendIllust(illust, {
               session,
               logger: ctx.logger,
@@ -419,6 +548,8 @@ export default definePlugin<PluginConfig>({
               publicBaseUrl,
               withInfo: ctx.config.show_image_info ?? true,
               detail: false,
+              keyboard: showButtons ? rerollKeyboard(`/pixiv random${explicit}`) : undefined,
+              order,
             })
           }
           if (sub === 'illust') {
@@ -434,9 +565,18 @@ export default definePlugin<PluginConfig>({
               publicBaseUrl,
               withInfo: true,
               detail: true,
+              // 指定作品没有"再来一张"的语义，给一个换随机图的入口
+              keyboard: showButtons ? rerollKeyboard('/pixiv random', '随机一张') : undefined,
+              order,
             })
           }
-          return HELP
+          // 帮助：自己发而不是 return，才能拿到发送结果、在按钮失败时退回纯文本
+          const res = await replyText(session, ctx.logger, HELP, showButtons ? helpKeyboard() : undefined)
+          if (!res.ok) {
+            ctx.logger.error('帮助文案发送失败', { error: res.error ?? '未知错误' })
+            return `消息发送失败：${res.error ?? '未知错误'}`
+          }
+          return undefined
         } catch (e) {
           return errorMessage(e)
         }

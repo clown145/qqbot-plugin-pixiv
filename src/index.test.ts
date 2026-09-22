@@ -65,26 +65,52 @@ function hitProxy(src: string) {
   })
 }
 
+/** 从出站消息里取出按钮的 label 与指令，便于断言按钮内容而不被结构细节干扰 */
+function buttonsOf(message: unknown): Array<{ label: string; data: string }> {
+  const kb = (
+    message as {
+      keyboard?: { content?: { rows: Array<{ buttons: Array<{ render_data: { label: string }; action: { data?: string } }> }> } }
+    }
+  ).keyboard
+  if (!kb?.content) return []
+  return kb.content.rows.flatMap((row) =>
+    row.buttons.map((b) => ({ label: b.render_data.label, data: b.action.data ?? '' })),
+  )
+}
+
+/** 出站消息的文本（字符串或 { text } 两种形态都取得到） */
+function textOf(message: unknown): string {
+  return typeof message === 'string' ? message : ((message as { text?: string }).text ?? '')
+}
+
 const REGULAR_URL = 'https://pixiv.yuki.sh/image/img-master/regular.jpg'
 
 afterEach(() => vi.unstubAllGlobals())
 
 describe('pixiv plugin', () => {
-  it('无参数回复帮助文案', async () => {
+  it('无参数回复帮助文案，并挂上三条指令按钮', async () => {
     const { replies } = await run('')
     expect(replies).toHaveLength(1)
-    expect(replies[0]).toContain('/pixiv random')
-    expect(replies[0]).toContain('/pixiv illust')
+    expect(textOf(replies[0])).toContain('/pixiv random')
+    expect(textOf(replies[0])).toContain('/pixiv illust')
+    // 指令按钮（action.type=2）由客户端插入 @bot + data，群聊也能命中命令
+    expect(buttonsOf(replies[0])).toEqual([
+      { label: '随机一张', data: '/pixiv random' },
+      { label: '随机原图', data: '/pixiv random original' },
+      { label: '随机小图', data: '/pixiv random small' },
+    ])
   })
 
   it('random：作品信息与图片分两条发送，图片为 base64 直传', async () => {
     const fetchMock = okFetch({ success: true, data: ILLUST })
     vi.stubGlobal('fetch', fetchMock)
     const { replies } = await run('random')
-    expect(replies).toEqual([
+    expect(replies).toHaveLength(2)
+    expect(textOf(replies[0])).toBe(
       '随机Pixiv图片\n标题：青のパレード\n作者：朔月八雲 (ID: 17509087)\n标签：女の子, オリジナル, 少女',
-      { image: { base64: IMG_BASE64 } },
-    ])
+    )
+    expect(buttonsOf(replies[0])).toEqual([{ label: '再来一张', data: '/pixiv random' }])
+    expect(replies[1]).toEqual({ image: { base64: IMG_BASE64 } })
     const [apiUrl, apiInit] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(apiUrl).toBe('https://pixiv.yuki.sh/api/recommend?type=json')
     expect((apiInit.headers as Record<string, string>).Referer).toBe('https://pixiv.yuki.sh/')
@@ -136,13 +162,15 @@ describe('pixiv plugin', () => {
     const fetchMock = okFetch({ success: true, data: ILLUST })
     vi.stubGlobal('fetch', fetchMock)
     const { replies } = await run('illust 118908797')
-    expect(replies[0]).toBe(
+    expect(textOf(replies[0])).toBe(
       '作品详情 (ID: 118908797)\n' +
         '标题：青のパレード\n' +
         '作者：朔月八雲 (ID: 17509087 | 账号：sakutsuki)\n' +
         '描述：无\n' +
         '标签：女の子, オリジナル, 少女',
     )
+    // 指定作品没有"再来一张"的语义，按钮换成"随机一张"
+    expect(buttonsOf(replies[0])).toEqual([{ label: '随机一张', data: '/pixiv random' }])
     expect(replies[1]).toEqual({ image: { base64: IMG_BASE64 } })
     expect(fetchMock.mock.calls[0]?.[0]).toBe('https://pixiv.yuki.sh/api/illust?id=118908797')
   })
@@ -167,7 +195,8 @@ describe('pixiv plugin', () => {
 
   it('未知子命令回复帮助文案', async () => {
     const { replies } = await run('wallpaper')
-    expect(replies[0]).toContain('/pixiv random')
+    expect(textOf(replies[0])).toContain('/pixiv random')
+    expect(buttonsOf(replies[0])).toHaveLength(3)
   })
 
   it('图片下载失败：已发作品信息时不重复报错，纯图模式回错误文案', async () => {
@@ -192,7 +221,7 @@ describe('pixiv plugin', () => {
     expect(withoutInfo.replies[0]).toContain('图片下载失败')
   })
 
-  it('被动回复被拒（reply not ok）：返回带原因的错误文案', async () => {
+  it('文本被平台拒绝：带按钮失败后去掉按钮重试，仍失败才报错', async () => {
     vi.stubGlobal('fetch', okFetch({ success: true, data: ILLUST }))
     const session = createMockSession()
     const ctx = createMockContext(plugin, { config: CONFIG })
@@ -204,8 +233,33 @@ describe('pixiv plugin', () => {
       ctx,
       session,
     })
-    expect(replyMock).toHaveBeenCalledTimes(1)
+    // 第一次带按钮、第二次去掉按钮——按钮要 bot 侧开通，不能因为按钮把整条文案赔进去
+    expect(replyMock).toHaveBeenCalledTimes(2)
+    expect(buttonsOf(replyMock.mock.calls[0]?.[0])).toHaveLength(1)
+    expect(typeof replyMock.mock.calls[1]?.[0]).toBe('string')
     expect(result).toContain('平台拒绝（错误码 11244）')
+  })
+
+  it('按钮发送失败但纯文本成功：用户仍能收到文案，不报错', async () => {
+    vi.stubGlobal('fetch', okFetch({ success: true, data: ILLUST }))
+    const session = createMockSession()
+    const ctx = createMockContext(plugin, { config: CONFIG })
+    const replyMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 400, error: '按钮未开通', raw: null })
+      .mockResolvedValueOnce({ ok: true, status: 200, raw: null })
+      .mockResolvedValueOnce({ ok: true, status: 200, raw: null })
+    session.reply = replyMock as never
+
+    const result = await (plugin.commands!.pixiv as { handler: (i: unknown) => Promise<string | undefined> }).handler({
+      args: ['random'],
+      ctx,
+      session,
+    })
+    expect(result).toBeUndefined()
+    expect(replyMock).toHaveBeenCalledTimes(3) // 带按钮失败 → 纯文本 → 图片
+    expect(typeof replyMock.mock.calls[1]?.[0]).toBe('string')
+    expect(replyMock.mock.calls[2]?.[0]).toEqual({ image: { base64: IMG_BASE64 } })
   })
 
   it('体积超预算：提前掐断超限响应体，并回落小一档', async () => {
@@ -379,6 +433,52 @@ describe('pixiv plugin', () => {
     })
     expect(replyMock.mock.calls[2]?.[0]).toEqual({ image: { base64: IMG_BASE64 } })
     expect(fetchMock).toHaveBeenCalledTimes(2) // API + 自己下载一次
+  })
+
+  it('message_order = image_first：图片在前，文案连同按钮落在最底部', async () => {
+    vi.stubGlobal('fetch', okFetch({ success: true, data: ILLUST }))
+    const { replies } = await run('random', { message_order: 'image_first' })
+    expect(replies).toHaveLength(2)
+    expect(replies[0]).toEqual({ image: { base64: IMG_BASE64 } })
+    expect(textOf(replies[1])).toContain('标题：青のパレード')
+    expect(buttonsOf(replies[1])).toHaveLength(1)
+  })
+
+  it('image_first 下图片失败时不发文案——描述一张没发出的图没有意义', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse({ success: true, data: ILLUST }))
+        .mockRejectedValueOnce(new Error('node down')),
+    )
+    const { replies } = await run('random', { message_order: 'image_first' })
+    // 文案没发出去，所以错误可以透给用户；text_first 下则会静默（文案已发出）
+    expect(replies).toHaveLength(1)
+    expect(replies[0]).toContain('图片下载失败')
+  })
+
+  it('show_buttons 关闭时文本与帮助都不挂按钮', async () => {
+    vi.stubGlobal('fetch', okFetch({ success: true, data: ILLUST }))
+    const { replies } = await run('random', { show_buttons: false })
+    expect(replies).toHaveLength(2)
+    expect(typeof replies[0]).toBe('string') // 无按钮时保持纯文本，不升级成 markdown
+    expect(buttonsOf(replies[0])).toEqual([])
+
+    const help = await run('', { show_buttons: false })
+    expect(textOf(help.replies[0])).toContain('/pixiv random')
+    expect(buttonsOf(help.replies[0])).toEqual([])
+  })
+
+  it('再来一张复用显式尺寸参数，非法参数则回到默认', async () => {
+    vi.stubGlobal('fetch', okFetch({ success: true, data: ILLUST }))
+    const sized = await run('random mini')
+    expect(buttonsOf(sized.replies[0])).toEqual([{ label: '再来一张', data: '/pixiv random mini' }])
+
+    // huge 不是合法尺寸，pickSize 会回落到配置默认，按钮也不该把它带下去
+    vi.stubGlobal('fetch', okFetch({ success: true, data: ILLUST }))
+    const bogus = await run('random huge')
+    expect(buttonsOf(bogus.replies[0])).toEqual([{ label: '再来一张', data: '/pixiv random' }])
   })
 
   it('代理路由拒绝白名单外的地址（不沦为开放代理）', async () => {
