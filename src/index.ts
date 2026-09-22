@@ -322,12 +322,14 @@ function infoText(illust: Illust, detail: boolean): string {
   const user = illust.user ?? {}
   const tags = (illust.tags ?? []).join(', ')
   if (!detail) {
-    return `随机Pixiv图片\n标题：${illust.title}\n作者：${user.name ?? '未知'} (ID: ${user.id ?? '未知'})\n标签：${tags}`
+    // 作品 ID 与作者 ID 必须分开标注：用户会拿这里的 ID 去 illust 指令查详情，
+    // 而 illust 查的是作品库——只标一个含糊的 "ID" 会让用户拿作者 ID 查出 404。
+    return `随机Pixiv图片\n标题：${illust.title}\n作品ID：${illust.id}\n作者：${user.name ?? '未知'} (作者ID: ${user.id ?? '未知'})\n标签：${tags}`
   }
   return (
-    `作品详情 (ID: ${illust.id})\n` +
+    `作品详情 (作品ID: ${illust.id})\n` +
     `标题：${illust.title}\n` +
-    `作者：${user.name ?? '未知'} (ID: ${user.id ?? '未知'} | 账号：${user.account ?? '未知'})\n` +
+    `作者：${user.name ?? '未知'} (作者ID: ${user.id ?? '未知'} | 账号：${user.account ?? '未知'})\n` +
     `描述：${illust.description || '无'}\n` +
     `标签：${tags}`
   )
@@ -336,7 +338,7 @@ function infoText(illust: Illust, detail: boolean): string {
 /** 人类可读的错误文案（对齐原插件） */
 function errorMessage(e: unknown): string {
   if (e instanceof ApiError) {
-    const hint = e.status === 404 ? ' - API地址可能已变更或资源不存在' : e.status === 403 ? ' - 访问被拒绝，可能是IP限制' : ''
+    const hint = e.status === 404 ? ' - 作品或图片不存在，可能已删除或 ID 有误' : e.status === 403 ? ' - 访问被拒绝，可能是IP限制' : ''
     return `请求失败（状态码：${e.status}${hint}），请稍后再试`
   }
   return (e as Error)?.message || '调用API出错，请稍后再试'

@@ -107,7 +107,7 @@ describe('pixiv plugin', () => {
     const { replies } = await run('random')
     expect(replies).toHaveLength(2)
     expect(textOf(replies[0])).toBe(
-      '随机Pixiv图片\n标题：青のパレード\n作者：朔月八雲 (ID: 17509087)\n标签：女の子, オリジナル, 少女',
+      '随机Pixiv图片\n标题：青のパレード\n作品ID：118908797\n作者：朔月八雲 (作者ID: 17509087)\n标签：女の子, オリジナル, 少女',
     )
     expect(buttonsOf(replies[0])).toEqual([{ label: '再来一张', data: '/pixiv random' }])
     expect(replies[1]).toEqual({ image: { base64: IMG_BASE64 } })
@@ -163,9 +163,9 @@ describe('pixiv plugin', () => {
     vi.stubGlobal('fetch', fetchMock)
     const { replies } = await run('illust 118908797')
     expect(textOf(replies[0])).toBe(
-      '作品详情 (ID: 118908797)\n' +
+      '作品详情 (作品ID: 118908797)\n' +
         '标题：青のパレード\n' +
-        '作者：朔月八雲 (ID: 17509087 | 账号：sakutsuki)\n' +
+        '作者：朔月八雲 (作者ID: 17509087 | 账号：sakutsuki)\n' +
         '描述：无\n' +
         '标签：女の子, オリジナル, 少女',
     )
@@ -178,7 +178,7 @@ describe('pixiv plugin', () => {
   it('HTTP 错误返回分类文案', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) }))
     const { replies } = await run('illust 1')
-    expect(replies[0]).toBe('请求失败（状态码：404 - API地址可能已变更或资源不存在），请稍后再试')
+    expect(replies[0]).toBe('请求失败（状态码：404 - 作品或图片不存在，可能已删除或 ID 有误），请稍后再试')
   })
 
   it('success:false 透出上游 message', async () => {
