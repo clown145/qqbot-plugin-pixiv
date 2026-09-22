@@ -23,26 +23,36 @@ const SIZE_DESC: readonly ImageSize[] = ['original', 'regular', 'small', 'thumb'
 const FALLBACK_ORDER: readonly ImageSize[] = ['regular', 'original', 'small', 'thumb', 'mini']
 
 /**
- * 单张图片体积上限的默认值。Workers Free 每请求固定 10 ms CPU，官方明确不可提升，
- * 而 base64 直传的成本随体积线性增长，所以必须有个阈值。推导（3 MB 图实测）：
+ * 单张图片体积上限的推导。Workers Free 每请求固定 10 ms CPU，官方明确不可提升，
+ * 而 base64 直传的成本随体积线性增长，所以需要一个阈值（推导基准：3 MB 图实测）：
  *   原生 base64 编码   ≈ 0.3 ms（改造后；原实现在同一张图上要 46 ms）
  *   出站载荷序列化     ≈ 1.87 ms / MB **载荷**（实测 JSON.stringify 吞吐稳定在 537 MB/s）
  *                        base64 膨胀 1.33 倍 ⇒ ≈ 2.5 ms / MB **原图**（注意别把这两个单位搞混）
  *   运行时基线         ≈ 2.2 ms（官方公布的 Worker 平均值；宿主实际值未知，故留大余量）
- * 预算 10 − 2.2 − 0.3 ≈ 7.5 ms 用于序列化 ⇒ 原图天花板约 3.0 MB。
+ * 预算 10 − 2.2 − 0.3 ≈ 7.5 ms 用于序列化 ⇒ **Free 上的安全区约 3.0 MB**。
  *
- * 默认取 2.0 MB：约 5.0 ms 序列化，合计约 7.5 ms，留 25% 余量。
- * 偏向保守是因为两种错法的代价不对称——阈值偏小只是偶尔回落小一档（优雅降级），
- * 偏大则直接撞 Error 1102 让整条消息失败。上线后用 `wrangler tail` 观察有无
- * `exceededCpu`，确认稳定后再经面板把 max_image_mb 调高。
+ * 面板上限取 QQ 自己的图片软限制 20 MB（官方富媒体文档：`file_type=1` 软限制 20 MB、
+ * 硬限制 200 MB，超软限制会降级为文件卡片）——原图超过 20 MB，平台本来就会把它当
+ * 文件发而不是内联图，再往上调没有意义。这个数字是有据可依的，不是随手取的护栏。
  */
-const DEFAULT_MAX_IMAGE_MB = 2
+const MAX_IMAGE_MB_CEILING = 20
 
 /**
- * 面板可调的上限。只是防止把配置填成荒唐值，**不代表 6 MB 在 Free 上能跑通**——
- * 按上面的推导超过约 3 MB 就必然超限。真要传大图请配 public_base_url 走 URL 直传。
+ * 默认值 = 上限，即**默认不做人为限制**。
+ *
+ * 这是一次有意的取舍，代价必须写清楚：在 Free 套餐且**未配置 public_base_url**（或
+ * URL 直传失败回退 base64）时，超过约 3 MB 的图会直接撞 Error 1102 让整条消息失败，
+ * 而不再回落小一档。原因是两种错法的代价不对称——阈值偏小只是偶尔降一档（优雅降级），
+ * 偏大则是硬失败；且这条路径**没有兜底**，CPU 花光后任何补救动作本身还要再花 CPU。
+ *
+ * 之所以敢把默认放这么宽，是因为推荐的 URL 直传路径根本不会走到这里：配了
+ * public_base_url 后图片不经插件下载，本阈值被完全忽略。也就是说默认值只在
+ * "URL 直传不可用"这条退路上生效。
+ *
+ * → 在 Free 上跑 base64 路径且想稳，把 max_image_mb 调到 2；Paid 套餐（30 s CPU）
+ *   下 20 MB 完全没问题。安全区的推导见上。
  */
-const MAX_IMAGE_MB_CEILING = 6
+const DEFAULT_MAX_IMAGE_MB = MAX_IMAGE_MB_CEILING
 
 /** 图片代理路由：运行时把插件路由挂在 `/p/<插件名>/` 下，改插件名时这里必须同步 */
 const PROXY_MOUNT = '/p/pixiv'
@@ -366,11 +376,12 @@ export default definePlugin<PluginConfig>({
       },
       max_image_mb: {
         type: 'number',
-        title: '单张图片体积上限（MB）',
+        title: '单张图片体积上限（MB，仅 base64 路径生效）',
         default: DEFAULT_MAX_IMAGE_MB,
         minimum: 0.5,
         maximum: MAX_IMAGE_MB_CEILING,
-        description: `超过此体积的图会回落小一档。Free 套餐单请求 CPU 上限 10 ms，原图超过约 3 MB 必然超限；默认 ${DEFAULT_MAX_IMAGE_MB} MB，确认 wrangler tail 无 exceededCpu 后可调高`,
+        description:
+          `超过此体积的图会回落小一档。默认等于上限（${MAX_IMAGE_MB_CEILING} MB，即不做人为限制）。仅 base64 路径生效：配了 public_base_url 走 URL 直传后图片不经插件下载，本项被忽略。注意 Free 套餐单请求 CPU 上限 10 ms，base64 路径的安全区只有约 3 MB——在 Free 上且 URL 直传不可用时建议调到 2，否则超过约 3 MB 的图会撞 Error 1102 整条失败，而不是回落小一档。Paid 套餐（默认 30 s CPU）无需调整`,
       },
       public_base_url: {
         type: 'string',

@@ -217,7 +217,8 @@ describe('pixiv plugin', () => {
       .mockResolvedValueOnce(new Response(new Uint8Array(IMG_BYTES)))
     vi.stubGlobal('fetch', fetchMock)
 
-    const { replies } = await run('random')
+    // 显式给 2 MB：默认已放宽到 20 MB，这里要验的是回落机制本身而非默认值
+    const { replies } = await run('random', { max_image_mb: 2 })
     expect(replies[1]).toEqual({ image: { base64: IMG_BASE64 } })
     expect(big.cancel).toHaveBeenCalledOnce() // 没读字节就放弃，省掉一次完整搬运
     expect(fetchMock.mock.calls[1]?.[0]).toBe('https://pixiv.yuki.sh/image/img-master/regular.jpg')
@@ -236,7 +237,7 @@ describe('pixiv plugin', () => {
         .mockResolvedValueOnce(second.res),
     )
 
-    const { replies } = await run('random', { show_image_info: false })
+    const { replies } = await run('random', { show_image_info: false, max_image_mb: 2 })
     expect(replies).toHaveLength(1)
     // 体积超限是尺寸问题不是网络问题，文案要给出可执行的下一步
     expect(replies[0]).toContain('超出单次处理上限')
@@ -270,9 +271,25 @@ describe('pixiv plugin', () => {
     expect(replies).toHaveLength(2) // 直接用了 regular，没有回落到 mini
   })
 
-  it('max_image_mb 被夹在 6 MB 上限内', async () => {
-    const huge = oversizeResponse(10 * 1024 * 1024)
-    const next = oversizeResponse(10 * 1024 * 1024)
+  it('默认阈值等于上限（20 MB），对 3 MB 的图不做人为限制', async () => {
+    const big = oversizeResponse(3 * 1024 * 1024)
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse({ success: true, data: ILLUST }))
+        .mockResolvedValueOnce(big.res),
+    )
+
+    // 有意选择：默认不设限制，把 Free 上的 CPU 风险交给使用者权衡（见配置说明）。
+    // 这条用例把该决定钉住，避免以后被"顺手改回保守值"。
+    await run('random', { show_image_info: false })
+    expect(big.cancel).not.toHaveBeenCalled()
+  })
+
+  it('max_image_mb 被夹在 20 MB 上限内', async () => {
+    const huge = oversizeResponse(25 * 1024 * 1024)
+    const next = oversizeResponse(25 * 1024 * 1024)
     vi.stubGlobal(
       'fetch',
       vi
@@ -282,10 +299,24 @@ describe('pixiv plugin', () => {
         .mockResolvedValueOnce(next.res),
     )
 
-    // 填 999 也应被夹到 6 MB，10 MB 的图仍然超限
+    // 填 999 也应被夹到 20 MB（QQ 图片软限制），25 MB 的图仍然超限
     await run('random', { show_image_info: false, max_image_mb: 999 })
     expect(huge.cancel).toHaveBeenCalledOnce()
     expect(next.cancel).toHaveBeenCalledOnce()
+  })
+
+  it('max_image_mb 上限确为 20 MB：15 MB 的图不再被判超限', async () => {
+    const big = oversizeResponse(15 * 1024 * 1024)
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse({ success: true, data: ILLUST }))
+        .mockResolvedValueOnce(big.res),
+    )
+
+    await run('random', { show_image_info: false, max_image_mb: 999 })
+    expect(big.cancel).not.toHaveBeenCalled() // 20 MB 上限内，放行
   })
 
   it('配置 public_base_url 后改走 URL 直传，插件不再下载图片', async () => {

@@ -1,6 +1,6 @@
 {
   "name": "pixiv",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "apiVersion": 1,
   "permissions": [
     "net"
@@ -53,11 +53,11 @@
       },
       "max_image_mb": {
         "type": "number",
-        "title": "单张图片体积上限（MB）",
-        "default": 2,
+        "title": "单张图片体积上限（MB，仅 base64 路径生效）",
+        "default": 20,
         "minimum": 0.5,
-        "maximum": 6,
-        "description": "超过此体积的图会回落小一档。Free 套餐单请求 CPU 上限 10 ms，原图超过约 3 MB 必然超限；默认 2 MB，确认 wrangler tail 无 exceededCpu 后可调高"
+        "maximum": 20,
+        "description": "超过此体积的图会回落小一档。默认等于上限（20 MB，即不做人为限制）。仅 base64 路径生效：配了 public_base_url 走 URL 直传后图片不经插件下载，本项被忽略。注意 Free 套餐单请求 CPU 上限 10 ms，base64 路径的安全区只有约 3 MB——在 Free 上且 URL 直传不可用时建议调到 2，否则超过约 3 MB 的图会撞 Error 1102 整条失败，而不是回落小一档。Paid 套餐（默认 30 s CPU）无需调整"
       },
       "public_base_url": {
         "type": "string",
@@ -70,7 +70,7 @@
   "defaultConfig": {
     "show_image_info": true,
     "default_image_size": "regular",
-    "max_image_mb": 2,
+    "max_image_mb": 20,
     "public_base_url": ""
   }
 }
