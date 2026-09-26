@@ -1,4 +1,4 @@
-# qqbot-plugin-pixiv
+# qflarebot-plugin-pixiv
 
 运行在 [QFlareBot](https://github.com/qflarebot/QFlareBot)（Cloudflare Workers）上的 QQ 机器人 Pixiv 图床插件，移植自 AstrBot 插件 [astrbot_plugin_pixiv_yuki](https://github.com/NightDust981989/astrbot_plugin_pixiv_yuki)。
 
@@ -193,7 +193,7 @@ v1.2.0 为此加入两层处理：
 机器人面板 → 插件 → 安装插件，source 填：
 
 ```
-git:<owner>/qqbot-plugin-pixiv@<完整commit>
+git:<owner>/qflarebot-plugin-pixiv@<完整commit>
 ```
 
 ## 开发
