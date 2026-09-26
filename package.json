@@ -17,8 +17,8 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250917.0",
-    "@qqbot/plugin-cli": "^0.1.0",
-    "@qqbot/sdk": "^0.1.0",
+    "@qqbot/plugin-cli": "file:../QFlareBot/packages/plugin-cli",
+    "@qqbot/sdk": "file:../QFlareBot/packages/sdk",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"
   }
