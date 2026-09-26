@@ -349,6 +349,17 @@ const HELP =
   '/pixiv random [尺寸]\n' +
   '/pixiv illust [作品id]'
 
+/** random 与 illust 共用、只取决于配置的发送参数；尺寸、信息详略与按钮由各子命令自己定 */
+function sendSettings(ctx: { config: PluginConfig; logger: ReplyLogger }, session: { reply: ReplyFn }) {
+  return {
+    session,
+    logger: ctx.logger,
+    maxBytes: resolveMaxBytes(ctx.config.max_image_mb),
+    publicBaseUrl: resolvePublicBaseUrl(ctx.config.public_base_url),
+    order: resolveOrder(ctx.config.message_order),
+  }
+}
+
 interface SendOpts {
   session: { reply: ReplyFn }
   logger: ReplyLogger
@@ -527,58 +538,63 @@ export default definePlugin<PluginConfig>({
   },
 
   commands: {
+    // 单独 /pixiv，或后面跟了不认识的词：回帮助
     pixiv: {
       description: 'Pixiv 随机美图 / 作品详情',
       usage: HELP,
+      async handler({ ctx, session }) {
+        const showButtons = ctx.config.show_buttons ?? true
+        // 帮助：自己发而不是 return，才能拿到发送结果、在按钮失败时退回纯文本
+        const res = await replyText(session, ctx.logger, HELP, showButtons ? helpKeyboard() : undefined)
+        if (!res.ok) {
+          ctx.logger.error('帮助文案发送失败', { error: res.error ?? '未知错误' })
+          return `消息发送失败：${res.error ?? '未知错误'}`
+        }
+        return undefined
+      },
+    },
+
+    'pixiv random': {
+      description: '随机一张 Pixiv 美图',
+      usage: '/pixiv random [尺寸]',
       async handler({ args, ctx, session }) {
-        const sub = (args[0] ?? '').toLowerCase()
-        const maxBytes = resolveMaxBytes(ctx.config.max_image_mb)
-        const publicBaseUrl = resolvePublicBaseUrl(ctx.config.public_base_url)
-        const order = resolveOrder(ctx.config.message_order)
         const showButtons = ctx.config.show_buttons ?? true
         try {
-          if (sub === 'random') {
-            const size = pickSize(args[1], ctx.config.default_image_size)
-            const illust = await fetchIllust('recommend?type=json')
-            // 按钮复用刚生效的那条指令：显式尺寸参数合法时带上它，否则回到默认尺寸
-            const explicit = args[1] && (SIZES as readonly string[]).includes(args[1]) ? ` ${args[1]}` : ''
-            return await sendIllust(illust, {
-              session,
-              logger: ctx.logger,
-              size,
-              maxBytes,
-              publicBaseUrl,
-              withInfo: ctx.config.show_image_info ?? true,
-              detail: false,
-              keyboard: showButtons ? rerollKeyboard(`/pixiv random${explicit}`) : undefined,
-              order,
-            })
-          }
-          if (sub === 'illust') {
-            const id = args[1]
-            if (!id) return '请输入作品id：/pixiv illust [id]'
-            if (!/^\d+$/.test(id)) return '作品ID必须是数字'
-            const illust = await fetchIllust(`illust?id=${id}`)
-            return await sendIllust(illust, {
-              session,
-              logger: ctx.logger,
-              size: pickSize(undefined, ctx.config.default_image_size),
-              maxBytes,
-              publicBaseUrl,
-              withInfo: true,
-              detail: true,
-              // 指定作品没有"再来一张"的语义，给一个换随机图的入口
-              keyboard: showButtons ? rerollKeyboard('/pixiv random', '随机一张') : undefined,
-              order,
-            })
-          }
-          // 帮助：自己发而不是 return，才能拿到发送结果、在按钮失败时退回纯文本
-          const res = await replyText(session, ctx.logger, HELP, showButtons ? helpKeyboard() : undefined)
-          if (!res.ok) {
-            ctx.logger.error('帮助文案发送失败', { error: res.error ?? '未知错误' })
-            return `消息发送失败：${res.error ?? '未知错误'}`
-          }
-          return undefined
+          const size = pickSize(args[0], ctx.config.default_image_size)
+          const illust = await fetchIllust('recommend?type=json')
+          // 按钮复用刚生效的那条指令：显式尺寸参数合法时带上它，否则回到默认尺寸
+          const explicit = args[0] && (SIZES as readonly string[]).includes(args[0]) ? ` ${args[0]}` : ''
+          return await sendIllust(illust, {
+            ...sendSettings(ctx, session),
+            size,
+            withInfo: ctx.config.show_image_info ?? true,
+            detail: false,
+            keyboard: showButtons ? rerollKeyboard(`/pixiv random${explicit}`) : undefined,
+          })
+        } catch (e) {
+          return errorMessage(e)
+        }
+      },
+    },
+
+    'pixiv illust': {
+      description: '查询 Pixiv 作品详情并附图',
+      usage: '/pixiv illust <作品ID>',
+      async handler({ args, ctx, session }) {
+        const showButtons = ctx.config.show_buttons ?? true
+        const id = args[0]
+        if (!id) return '请输入作品id：/pixiv illust [id]'
+        if (!/^\d+$/.test(id)) return '作品ID必须是数字'
+        try {
+          const illust = await fetchIllust(`illust?id=${id}`)
+          return await sendIllust(illust, {
+            ...sendSettings(ctx, session),
+            size: pickSize(undefined, ctx.config.default_image_size),
+            withInfo: true,
+            detail: true,
+            // 指定作品没有"再来一张"的语义，给一个换随机图的入口
+            keyboard: showButtons ? rerollKeyboard('/pixiv random', '随机一张') : undefined,
+          })
         } catch (e) {
           return errorMessage(e)
         }

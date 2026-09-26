@@ -1,6 +1,6 @@
 # qqbot-plugin-pixiv
 
-运行在 [qqbot-workers](https://github.com/)（Cloudflare Workers）上的 QQ 机器人 Pixiv 图床插件，移植自 AstrBot 插件 [astrbot_plugin_pixiv_yuki](https://github.com/NightDust981989/astrbot_plugin_pixiv_yuki)。
+运行在 [QFlareBot](https://github.com/qflarebot/QFlareBot)（Cloudflare Workers）上的 QQ 机器人 Pixiv 图床插件，移植自 AstrBot 插件 [astrbot_plugin_pixiv_yuki](https://github.com/NightDust981989/astrbot_plugin_pixiv_yuki)。
 
 图片资源来自 [pixiv.yuki.sh](https://pixiv.yuki.sh/) 第三方图床（已过滤 R-18），**版权归原作者所有**，使用需遵守相关法律法规及平台规则。
 
@@ -11,6 +11,8 @@
 | `/pixiv` | 查看帮助 |
 | `/pixiv random [尺寸]` | 随机一张图，尺寸可选 `mini / thumb / small / regular / original`，缺省用配置 |
 | `/pixiv illust <作品ID>` | 查询作品详情并附图 |
+
+v1.5.0 起 `random` / `illust` 声明成子命令（`'pixiv random'`、`'pixiv illust'`），面板和 QQ 指令面板会各列一项。需要 QFlareBot 支持子命令的版本（2026-09-26 起）；更老的版本上 `/pixiv random` 会落到帮助。
 
 ## 配置（面板 → 插件配置）
 
@@ -197,7 +199,7 @@ git:<owner>/qqbot-plugin-pixiv@<完整commit>
 ## 开发
 
 ```bash
-npm install        # @qqbot/sdk 未发布到 npm 前，可在 qqbot-workers monorepo 内以符号链接方式本地调试
+npm install        # @qqbot/sdk 不发 npm，从 QFlareBot 源码构建，和本仓库并排放、以符号链接方式本地调试
 npm test           # vitest（fetch 全部 mock，不打真实 API）
 npm run typecheck
 npm run build      # 产物 dist/plugin.js + dist/manifest.json

@@ -49,8 +49,20 @@ function oversizeResponse(bytes = 3 * 1024 * 1024) {
   }
 }
 
-function run(argText: string, config?: Partial<PluginConfig>) {
-  return runCommand(plugin, 'pixiv', argText, { ctx: { config: { ...CONFIG, ...config } } })
+/**
+ * 按用户在 /pixiv 后面打的字触发，路由与运行时一致：第一个词对得上子命令就进 `pixiv <词>`，
+ * 参数从它后面开始；对不上就落到 `pixiv`
+ */
+function run(text: string, config?: Partial<PluginConfig>) {
+  const [first = '', ...rest] = text.trim().split(/\s+/)
+  const sub = `pixiv ${first.toLowerCase()}`
+  const hit = first !== '' && sub in (plugin.commands ?? {})
+  return runCommand(plugin, hit ? sub : 'pixiv', hit ? rest.join(' ') : text, { ctx: { config: { ...CONFIG, ...config } } })
+}
+
+/** 直接调 /pixiv random 的处理器，用来替换 session.reply 观察发送过程 */
+function randomHandler() {
+  return (plugin.commands!['pixiv random'] as { handler: (i: unknown) => Promise<string | undefined> }).handler
 }
 
 /** 直接调用图片代理路由，模拟 QQ 富媒体服务器来拉图 */
@@ -88,6 +100,13 @@ const REGULAR_URL = 'https://pixiv.yuki.sh/image/img-master/regular.jpg'
 afterEach(() => vi.unstubAllGlobals())
 
 describe('pixiv plugin', () => {
+  it('random / illust 声明成子命令，各带自己的用法', () => {
+    const commands = plugin.commands as Record<string, { usage?: string }>
+    expect(Object.keys(commands)).toEqual(['pixiv', 'pixiv random', 'pixiv illust'])
+    expect(commands['pixiv random']?.usage).toBe('/pixiv random [尺寸]')
+    expect(commands['pixiv illust']?.usage).toBe('/pixiv illust <作品ID>')
+  })
+
   it('无参数回复帮助文案，并挂上三条指令按钮', async () => {
     const { replies } = await run('')
     expect(replies).toHaveLength(1)
@@ -228,11 +247,7 @@ describe('pixiv plugin', () => {
     const replyMock = vi.fn().mockResolvedValue({ ok: false, status: 500, error: '平台拒绝（错误码 11244）' })
     session.reply = replyMock as never
 
-    const result = await (plugin.commands!.pixiv as { handler: (i: unknown) => Promise<string | undefined> }).handler({
-      args: ['random'],
-      ctx,
-      session,
-    })
+    const result = await randomHandler()({ args: [], ctx, session })
     // 第一次带按钮、第二次去掉按钮——按钮要 bot 侧开通，不能因为按钮把整条文案赔进去
     expect(replyMock).toHaveBeenCalledTimes(2)
     expect(buttonsOf(replyMock.mock.calls[0]?.[0])).toHaveLength(1)
@@ -251,11 +266,7 @@ describe('pixiv plugin', () => {
       .mockResolvedValueOnce({ ok: true, status: 200, raw: null })
     session.reply = replyMock as never
 
-    const result = await (plugin.commands!.pixiv as { handler: (i: unknown) => Promise<string | undefined> }).handler({
-      args: ['random'],
-      ctx,
-      session,
-    })
+    const result = await randomHandler()({ args: [], ctx, session })
     expect(result).toBeUndefined()
     expect(replyMock).toHaveBeenCalledTimes(3) // 带按钮失败 → 纯文本 → 图片
     expect(typeof replyMock.mock.calls[1]?.[0]).toBe('string')
@@ -420,11 +431,7 @@ describe('pixiv plugin', () => {
     session.reply = replyMock as never
 
     const ctx = createMockContext(plugin, { config: { ...CONFIG, public_base_url: 'https://bot.example.com' } })
-    const result = await (plugin.commands!.pixiv as { handler: (i: unknown) => Promise<string | undefined> }).handler({
-      args: ['random'],
-      ctx,
-      session,
-    })
+    const result = await randomHandler()({ args: [], ctx, session })
 
     expect(result).toBeUndefined() // 图最终发出去了，不该给用户报错
     expect(replyMock).toHaveBeenCalledTimes(3)

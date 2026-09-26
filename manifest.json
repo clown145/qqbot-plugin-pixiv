@@ -1,6 +1,6 @@
 {
   "name": "pixiv",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "apiVersion": 1,
   "permissions": [
     "net"
@@ -12,6 +12,16 @@
       "name": "pixiv",
       "description": "Pixiv 随机美图 / 作品详情",
       "usage": "请按格式使用：\n/pixiv random [尺寸]\n/pixiv illust [作品id]"
+    },
+    {
+      "name": "pixiv random",
+      "description": "随机一张 Pixiv 美图",
+      "usage": "/pixiv random [尺寸]"
+    },
+    {
+      "name": "pixiv illust",
+      "description": "查询 Pixiv 作品详情并附图",
+      "usage": "/pixiv illust <作品ID>"
     }
   ],
   "regex": [],
